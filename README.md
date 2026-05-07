@@ -2,7 +2,18 @@
 
 Bootstrap-Installer für **Sleeplab** — Polysomnographie-Auswertung mit KI für Schlaflabore.
 
-Komplett-Stack: PostgreSQL + Supabase, U-Sleep / DeepResNet / Transformer / YASA Modelle, EDF-Pipeline, PSG-Viewer-Web-UI, Bericht-Generator.
+Komplett-Stack: PostgreSQL + Supabase, U-Sleep / DeepResNet / Transformer / YASA Modelle, EDF-Pipeline, PSG-Viewer-Web-UI, Bericht-Generator. Optional: separater Mac-mini-Worker für Video-Konvertierung (ASF→MP4) und LLM-Inferenz.
+
+## Zwei Installations-Pfade
+
+| Pfad | Wann | Befehl |
+|---|---|---|
+| **`install.sh`** | Hauptbox (Debian-VM) — pipeline + psg-viewer + sleepyland | siehe Schritt 4 unten |
+| **`install-mac-worker.sh`** | Optional: Mac mini als Video-Worker | siehe Abschnitt „Mac-Worker einrichten" |
+
+Wenn du **alles auf einer Linux-Box** laufen lassen willst, nutzt du nur `install.sh` mit Default-Setting (`INCLUDE_WORKER=yes`) — dann werden alle drei Repos in `/opt/sleeplab/` installiert.
+
+Wenn der Worker auf einer **separaten Mac mini** läuft, ist `install.sh` mit `INCLUDE_WORKER=no` zu starten und der Mac mini bekommt seinen eigenen Bootstrap.
 
 ---
 
@@ -95,13 +106,13 @@ Notiz (optional)               > z.B. Erstinstallation
 
 ### Schritt 5 — Token freischalten lassen
 
-Nach den Eingaben generiert der Installer **zwei SSH-Deploy-Keys** und zeigt einen vorgefertigten E-Mail-Text an. **Kopiere diesen Text komplett** und schicke ihn per E-Mail an:
+Nach den Eingaben generiert der Installer **die SSH-Deploy-Keys** (zwei oder drei je nach `INCLUDE_WORKER`-Setting) und zeigt einen vorgefertigten E-Mail-Text an. **Kopiere diesen Text komplett** und schicke ihn per E-Mail an:
 
 ```
 psg-viewer@marco-stankowitz.de
 ```
 
-Das PSG-Viewer-Team trägt die beiden Public Keys in GitHub ein (Read-Only-Deploy-Keys, keine Push-Rechte) und antwortet dir mit *„freigeschaltet"*.
+Das PSG-Viewer-Team trägt die Public Keys in GitHub ein (Read-Only-Deploy-Keys, keine Push-Rechte) und antwortet dir mit *„freigeschaltet"*.
 
 **Wichtig:** Lass das Terminal-Fenster mit dem laufenden Installer **offen** während du die E-Mail schickst und auf die Antwort wartest.
 
@@ -141,13 +152,80 @@ Danach optional:
 
 ---
 
+## Mac-Worker einrichten (optional, für Video + LLM)
+
+Wenn du einen Mac mini als Video-Worker einsetzen willst (typische Konstellation: Hauptbox = Debian-VM mit Pipeline + psg-viewer, Mac mini = ffmpeg-Konvertierung + Ollama-LLM), dann:
+
+### 1. Hauptbox ohne Worker installieren
+
+Auf der Debian-VM:
+
+```bash
+INCLUDE_WORKER=no sudo ./install.sh
+```
+
+Damit erzeugt der Installer nur Deploy-Keys für `pipeline` und `psg-viewer`.
+
+### 2. Mac-mini-Bootstrap
+
+Auf dem Mac mini (frisch eingerichtet, Homebrew installiert):
+
+```bash
+sudo curl -fsSL https://raw.githubusercontent.com/DarkRudolf/sleeplab-installer/main/install-mac-worker.sh -o install-mac-worker.sh
+chmod +x install-mac-worker.sh
+sudo ./install-mac-worker.sh
+```
+
+Das Skript führt durch:
+
+1. Klinik-/Mac-Daten abfragen
+2. Eigenen Deploy-Key für `sleeplab-video-worker` generieren
+3. **E-Mail-Text mit Public Key** anzeigen — den schickst du an `psg-viewer@marco-stankowitz.de` zur Freischaltung
+4. Nach Bestätigung: Repo klonen, venv anlegen, Self-Signed-TLS-Zertifikat erzeugen, `shared_secret` zufällig generieren, LaunchDaemon installieren und starten
+
+### 3. Im psg-viewer-Admin-Panel verbinden
+
+Am Ende zeigt der Mac-Installer die drei Werte für die Hauptbox:
+
+```
+Worker-URL:        https://192.168.x.y:8443
+Shared-Secret:     <hex>
+TLS-Fingerprint:   <SHA256>
+```
+
+Diese drei Werte trägst du im psg-viewer Admin-Panel unter „Video-Worker" ein. Damit weiß der psg-viewer wie er den Mac mini erreicht und prüft das TLS-Cert per Pinning gegen den Fingerprint — kein öffentliches CA-Cert nötig, weil's interne LAN-Kommunikation ist.
+
+### 4. Updates
+
+Updates des Worker-Codes triggerst du aus dem psg-viewer-Admin-Panel (Button „Worker aktualisieren"). Der psg-viewer ruft den `POST /admin/update`-Endpunkt am Worker, der seinerseits `git pull` macht und sich neu startet. Manuell:
+
+```bash
+sudo -u ki bash -c 'cd /opt/sleeplab-video-worker && git pull && .venv/bin/pip install -e .'
+sudo launchctl unload /Library/LaunchDaemons/de.sleeplab.video-worker.plist
+sudo launchctl load   /Library/LaunchDaemons/de.sleeplab.video-worker.plist
+```
+
+---
+
 ## Schnell-Übersicht (für erfahrene Admins)
+
+**Hauptbox alles in einer Linux-VM** (kein separater Mac):
 
 ```bash
 apt update && apt install -y curl ca-certificates gnupg sudo
 curl -fsSL https://get.docker.com | sh
 curl -fsSL https://raw.githubusercontent.com/DarkRudolf/sleeplab-installer/main/install.sh -o install.sh
 chmod +x install.sh && sudo ./install.sh
+```
+
+**Hauptbox + Mac-mini-Worker**:
+
+```bash
+# Box 1 — Debian-VM
+INCLUDE_WORKER=no sudo ./install.sh
+
+# Box 2 — Mac mini
+sudo ./install-mac-worker.sh
 ```
 
 ## Sicherheit

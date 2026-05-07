@@ -34,11 +34,21 @@ SUPPORT_EMAIL="${SUPPORT_EMAIL:-psg-viewer@marco-stankowitz.de}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/sleeplab}"
 PIPELINE_REPO="DarkRudolf/sleep-staging-pipeline"
 VIEWER_REPO="DarkRudolf/psg-viewer"
+WORKER_REPO="DarkRudolf/sleeplab-video-worker"
+
+# INCLUDE_WORKER steuert ob der Video-Worker mit-installiert wird.
+# Defaults:
+#   - "yes" wenn alles auf einer Box laeuft (Default fuer Single-Box-Setups)
+#   - "no" wenn der Worker auf einer separaten Maschine (Mac mini) laeuft —
+#     dort wird stattdessen install-mac-worker.sh genutzt.
+# Override via Env: INCLUDE_WORKER=no ./install.sh
+INCLUDE_WORKER="${INCLUDE_WORKER:-yes}"
 
 # Keys liegen zentral unter /etc/sleeplab/ssh/
 SSH_DIR="/etc/sleeplab/ssh"
 KEY_PIPELINE="$SSH_DIR/sleeplab-pipeline"
 KEY_VIEWER="$SSH_DIR/sleeplab-psgviewer"
+KEY_WORKER="$SSH_DIR/sleeplab-video-worker"
 SSH_CONFIG="$SSH_DIR/config"
 
 REQUEST_FILE="/tmp/sleeplab-token-request.txt"
@@ -85,30 +95,68 @@ log_phase "SSH-Deploy-Keys"
 # Wir versuchen sofort einen Verbindungstest. Wenn der gruen ist,
 # sind die Keys schon freigeschaltet → ueberspringen.
 KEYS_VALID=false
-if [[ -f "$KEY_PIPELINE" && -f "$KEY_VIEWER" && -f "$SSH_CONFIG" ]]; then
+NEEDED_KEY_FILES=("$KEY_PIPELINE" "$KEY_VIEWER")
+if [[ "$INCLUDE_WORKER" == "yes" ]]; then
+    NEEDED_KEY_FILES+=("$KEY_WORKER")
+fi
+
+ALL_KEYS_PRESENT=true
+for kf in "${NEEDED_KEY_FILES[@]}"; do
+    [[ -f "$kf" ]] || ALL_KEYS_PRESENT=false
+done
+if [[ ! -f "$SSH_CONFIG" ]]; then
+    ALL_KEYS_PRESENT=false
+fi
+
+if $ALL_KEYS_PRESENT; then
     log_info "Keys vorhanden — teste GitHub-Verbindung..."
     set +e
     SSH_OUT_P=$(ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
         -T git@github.com-sleeplab-pipeline 2>&1)
     SSH_OUT_V=$(ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
         -T git@github.com-sleeplab-psgviewer 2>&1)
+    if [[ "$INCLUDE_WORKER" == "yes" ]]; then
+        SSH_OUT_W=$(ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+            -T git@github.com-sleeplab-video-worker 2>&1)
+    fi
     set -e
-    if echo "$SSH_OUT_P" | grep -q "successfully authenticated" && \
-       echo "$SSH_OUT_V" | grep -q "successfully authenticated"; then
-        log_ok "Beide Deploy-Keys sind in GitHub freigeschaltet"
+
+    OK_P=false; OK_V=false; OK_W=true
+    echo "$SSH_OUT_P" | grep -q "successfully authenticated" && OK_P=true
+    echo "$SSH_OUT_V" | grep -q "successfully authenticated" && OK_V=true
+    if [[ "$INCLUDE_WORKER" == "yes" ]]; then
+        OK_W=false
+        echo "$SSH_OUT_W" | grep -q "successfully authenticated" && OK_W=true
+    fi
+
+    if $OK_P && $OK_V && $OK_W; then
+        log_ok "Alle Deploy-Keys sind in GitHub freigeschaltet"
         KEYS_VALID=true
     else
         log_warn "Keys vorhanden, aber GitHub akzeptiert sie noch nicht."
-        log_warn "  Pipeline: $(echo "$SSH_OUT_P" | head -1)"
-        log_warn "  Viewer:   $(echo "$SSH_OUT_V" | head -1)"
+        $OK_P || log_warn "  Pipeline: $(echo "$SSH_OUT_P" | head -1)"
+        $OK_V || log_warn "  Viewer:   $(echo "$SSH_OUT_V" | head -1)"
+        if [[ "$INCLUDE_WORKER" == "yes" ]]; then
+            $OK_W || log_warn "  Worker:   $(echo "$SSH_OUT_W" | head -1)"
+        fi
     fi
 fi
 
 if ! $KEYS_VALID; then
-    if [[ ! -f "$KEY_PIPELINE" || ! -f "$KEY_VIEWER" ]]; then
+    NEED_GENERATE=false
+    [[ ! -f "$KEY_PIPELINE" ]] && NEED_GENERATE=true
+    [[ ! -f "$KEY_VIEWER" ]] && NEED_GENERATE=true
+    [[ "$INCLUDE_WORKER" == "yes" && ! -f "$KEY_WORKER" ]] && NEED_GENERATE=true
+
+    if $NEED_GENERATE; then
+        if [[ "$INCLUDE_WORKER" == "yes" ]]; then
+            KEY_COUNT="drei"
+        else
+            KEY_COUNT="zwei"
+        fi
         cat <<EXPLAIN
 
-Es werden zwei SSH-Deploy-Keys generiert (einer pro privatem Repo).
+Es werden ${KEY_COUNT} SSH-Deploy-Keys generiert (einer pro privatem Repo).
 Die ${BOLD}Public Keys${NC} kommen in eine vorgefertigte E-Mail an Marco.
 Die ${BOLD}Private Keys${NC} verlassen niemals diesen Server (chmod 600).
 
@@ -133,14 +181,26 @@ EXPLAIN
         DATE_TAG=$(date '+%Y%m%d')
 
         log_info "Generiere SSH-Deploy-Keys (ed25519)..."
-        ssh-keygen -t ed25519 -N "" -C "sleeplab-pipeline-${CLINIC_SLUG}-${DATE_TAG}" \
-            -f "$KEY_PIPELINE" >/dev/null
-        ssh-keygen -t ed25519 -N "" -C "sleeplab-psgviewer-${CLINIC_SLUG}-${DATE_TAG}" \
-            -f "$KEY_VIEWER" >/dev/null
+        if [[ ! -f "$KEY_PIPELINE" ]]; then
+            ssh-keygen -t ed25519 -N "" -C "sleeplab-pipeline-${CLINIC_SLUG}-${DATE_TAG}" \
+                -f "$KEY_PIPELINE" >/dev/null
+        fi
+        if [[ ! -f "$KEY_VIEWER" ]]; then
+            ssh-keygen -t ed25519 -N "" -C "sleeplab-psgviewer-${CLINIC_SLUG}-${DATE_TAG}" \
+                -f "$KEY_VIEWER" >/dev/null
+        fi
+        if [[ "$INCLUDE_WORKER" == "yes" && ! -f "$KEY_WORKER" ]]; then
+            ssh-keygen -t ed25519 -N "" -C "sleeplab-video-worker-${CLINIC_SLUG}-${DATE_TAG}" \
+                -f "$KEY_WORKER" >/dev/null
+        fi
         chmod 600 "$KEY_PIPELINE" "$KEY_VIEWER"
         chmod 644 "${KEY_PIPELINE}.pub" "${KEY_VIEWER}.pub"
+        if [[ "$INCLUDE_WORKER" == "yes" ]]; then
+            chmod 600 "$KEY_WORKER"
+            chmod 644 "${KEY_WORKER}.pub"
+        fi
         chown -R root:root "$SSH_DIR"
-        log_ok "Keys erstellt: $KEY_PIPELINE, $KEY_VIEWER"
+        log_ok "Keys erstellt: $KEY_PIPELINE, $KEY_VIEWER$([[ "$INCLUDE_WORKER" == "yes" ]] && echo ", $KEY_WORKER")"
 
         # SSH-Config schreiben — nutzt ssh.github.com auf Port 443,
         # damit das auch hinter Firewalls funktioniert die Port 22 blockieren.
@@ -165,6 +225,18 @@ Host github.com-sleeplab-psgviewer
     IdentitiesOnly yes
     StrictHostKeyChecking accept-new
 EOF
+        if [[ "$INCLUDE_WORKER" == "yes" ]]; then
+            cat >> "$SSH_CONFIG" <<EOF
+
+Host github.com-sleeplab-video-worker
+    HostName ssh.github.com
+    Port 443
+    User git
+    IdentityFile $KEY_WORKER
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+EOF
+        fi
         chmod 600 "$SSH_CONFIG"
         log_ok "SSH-Config geschrieben: $SSH_CONFIG"
     else
@@ -190,7 +262,16 @@ EOF
 
     PUBKEY_PIPELINE=$(cat "${KEY_PIPELINE}.pub")
     PUBKEY_VIEWER=$(cat "${KEY_VIEWER}.pub")
+    PUBKEY_WORKER=""
+    if [[ "$INCLUDE_WORKER" == "yes" ]]; then
+        PUBKEY_WORKER=$(cat "${KEY_WORKER}.pub")
+    fi
 
+    if [[ "$INCLUDE_WORKER" == "yes" ]]; then
+        KEY_NUM_LABEL="alle drei privaten Repos"
+    else
+        KEY_NUM_LABEL="die beiden privaten Repos"
+    fi
     SUBJECT="[Sleeplab] Deploy-Key-Anfrage von ${CLINIC_NAME}"
 
     cat > "$REQUEST_FILE" <<EOF
@@ -200,7 +281,7 @@ Betreff:  ${SUBJECT}
 Hallo Marco,
 
 ich moechte Sleeplab installieren und brauche Deploy-Key-Freischaltung
-fuer die beiden privaten Repos. Anbei beide Public Keys zum Einfuegen.
+fuer ${KEY_NUM_LABEL}. Anbei die Public Keys zum Einfuegen.
 
 ────────────────────────────────────────────────────────────
 KLINIK-DATEN
@@ -242,6 +323,26 @@ Allow write access:  NEIN (uncheck)
 Key (eine Zeile):
 
 ${PUBKEY_VIEWER}
+EOF
+
+    if [[ "$INCLUDE_WORKER" == "yes" ]]; then
+        cat >> "$REQUEST_FILE" <<EOF
+
+────────────────────────────────────────────────────────────
+DEPLOY KEY 3 — fuer DarkRudolf/sleeplab-video-worker
+────────────────────────────────────────────────────────────
+GitHub-URL:
+  https://github.com/${WORKER_REPO}/settings/keys/new
+
+Title:               sleeplab-video-worker-${CLINIC_SLUG}
+Allow write access:  NEIN (uncheck)
+Key (eine Zeile):
+
+${PUBKEY_WORKER}
+EOF
+    fi
+
+    cat >> "$REQUEST_FILE" <<EOF
 
 ────────────────────────────────────────────────────────────
 
@@ -296,23 +397,34 @@ HINTS
             -T git@github.com-sleeplab-pipeline 2>&1)
         SSH_OUT_V=$(ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=10 \
             -T git@github.com-sleeplab-psgviewer 2>&1)
+        if [[ "$INCLUDE_WORKER" == "yes" ]]; then
+            SSH_OUT_W=$(ssh -F "$SSH_CONFIG" -o BatchMode=yes -o ConnectTimeout=10 \
+                -T git@github.com-sleeplab-video-worker 2>&1)
+        fi
         set -e
 
-        OK_P=false
-        OK_V=false
+        OK_P=false; OK_V=false; OK_W=true
         echo "$SSH_OUT_P" | grep -q "successfully authenticated" && OK_P=true
         echo "$SSH_OUT_V" | grep -q "successfully authenticated" && OK_V=true
+        if [[ "$INCLUDE_WORKER" == "yes" ]]; then
+            OK_W=false
+            echo "$SSH_OUT_W" | grep -q "successfully authenticated" && OK_W=true
+        fi
 
-        if $OK_P && $OK_V; then
-            log_ok "Beide Deploy-Keys sind in GitHub freigeschaltet"
+        if $OK_P && $OK_V && $OK_W; then
+            log_ok "Alle Deploy-Keys sind in GitHub freigeschaltet"
             break
         fi
 
-        log_err "Noch nicht beide Keys aktiv:"
+        log_err "Noch nicht alle Keys aktiv:"
         $OK_P && echo -e "    ${GREEN}✓${NC} sleep-staging-pipeline" \
               || echo -e "    ${RED}✗${NC} sleep-staging-pipeline: $(echo "$SSH_OUT_P" | head -1)"
         $OK_V && echo -e "    ${GREEN}✓${NC} psg-viewer" \
               || echo -e "    ${RED}✗${NC} psg-viewer: $(echo "$SSH_OUT_V" | head -1)"
+        if [[ "$INCLUDE_WORKER" == "yes" ]]; then
+            $OK_W && echo -e "    ${GREEN}✓${NC} sleeplab-video-worker" \
+                  || echo -e "    ${RED}✗${NC} sleeplab-video-worker: $(echo "$SSH_OUT_W" | head -1)"
+        fi
         echo ""
     done
 
@@ -344,7 +456,19 @@ else
     git clone "git@github.com-sleeplab-psgviewer:$VIEWER_REPO.git" "$INSTALL_DIR/psg-viewer"
 fi
 
-log_ok "Beide Repos verfuegbar in $INSTALL_DIR"
+# sleeplab-video-worker (optional — nur wenn auf gleicher Box wie pipeline+viewer)
+if [[ "$INCLUDE_WORKER" == "yes" ]]; then
+    if [[ -d "$INSTALL_DIR/sleeplab-video-worker/.git" ]]; then
+        log_info "sleeplab-video-worker existiert — git pull"
+        (cd "$INSTALL_DIR/sleeplab-video-worker" && git pull --ff-only) || log_warn "Pull fehlgeschlagen"
+    else
+        log_info "Klone $WORKER_REPO..."
+        git clone "git@github.com-sleeplab-video-worker:$WORKER_REPO.git" "$INSTALL_DIR/sleeplab-video-worker"
+    fi
+    log_ok "Drei Repos verfuegbar in $INSTALL_DIR"
+else
+    log_ok "Beide Repos verfuegbar in $INSTALL_DIR (Worker auf separater Maschine — siehe install-mac-worker.sh)"
+fi
 
 # ── Phase 3: Persistenter SSH-Config-Eintrag fuer kuenftige git pulls ──
 # Damit "git pull" in den Repos auch ohne GIT_SSH_COMMAND funktioniert,
