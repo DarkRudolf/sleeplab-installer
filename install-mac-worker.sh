@@ -76,26 +76,96 @@ if ! command -v brew &>/dev/null; then
     exit 1
 fi
 
-NEED_INSTALL=()
-for cmd in git ssh ssh-keygen openssl ffmpeg python3; do
-    if ! command -v "$cmd" &>/dev/null; then
-        case "$cmd" in
-            ffmpeg)  NEED_INSTALL+=("ffmpeg") ;;
-            python3) NEED_INSTALL+=("python@3.12") ;;
-            git|ssh|ssh-keygen|openssl) ;;  # System-Default
-        esac
+# Brew-Owner ermitteln — brew laeuft NICHT als root, sondern als der User
+# der Homebrew installiert hat. Typisch der Klinik-Admin-Login-User.
+BREW_PREFIX=$(/usr/bin/env brew --prefix 2>/dev/null || echo "")
+if [[ -z "$BREW_PREFIX" ]]; then
+    # Fallback fuer den Fall dass brew nicht im PATH ist (z.B. wenn als sudo
+    # ohne -i gestartet)
+    if [[ -x "/opt/homebrew/bin/brew" ]]; then
+        BREW_PREFIX="/opt/homebrew"
+    elif [[ -x "/usr/local/bin/brew" ]]; then
+        BREW_PREFIX="/usr/local"
+    else
+        log_err "Homebrew nicht gefunden. Installiere Homebrew zuerst:"
+        log_err "  /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+        exit 1
+    fi
+fi
+
+BREW_BIN="$BREW_PREFIX/bin/brew"
+BREW_OWNER=$(stat -f '%Su' "$BREW_PREFIX" 2>/dev/null || echo "")
+if [[ -z "$BREW_OWNER" || "$BREW_OWNER" == "root" ]]; then
+    log_err "Homebrew-Verzeichnis $BREW_PREFIX gehoert root oder ist nicht da."
+    log_err "Brew muss als Login-User (nicht root) installiert sein."
+    exit 1
+fi
+log_ok "Homebrew: $BREW_BIN (Owner: $BREW_OWNER)"
+
+# Helper: brew als richtigen User aufrufen
+run_brew() {
+    sudo -u "$BREW_OWNER" -H "$BREW_BIN" "$@"
+}
+
+# Python 3.11+ erzwingen — System-Python (3.9) reicht nicht. Erst nach
+# vorhandenen Brew-Pythons suchen, sonst python@3.12 installieren.
+PYTHON_BIN=""
+for cand in python3.13 python3.12 python3.11; do
+    if path=$(command -v "$cand" 2>/dev/null); then
+        PYTHON_BIN="$path"
+        break
+    fi
+    # Auch direkt im Brew-Prefix suchen — wenn brew nicht im PATH des
+    # sudo-Aufrufs liegt
+    if [[ -x "$BREW_PREFIX/bin/$cand" ]]; then
+        PYTHON_BIN="$BREW_PREFIX/bin/$cand"
+        break
     fi
 done
 
-if (( ${#NEED_INSTALL[@]} )); then
-    log_warn "Installiere fehlende Tools via Homebrew: ${NEED_INSTALL[*]}"
-    sudo -u "$(stat -f '%Su' /usr/local/Homebrew 2>/dev/null || stat -f '%Su' /opt/homebrew 2>/dev/null || echo "$WORKER_USER")" \
-        brew install "${NEED_INSTALL[@]}" || {
-        log_err "Homebrew-Installation fehlgeschlagen — bitte manuell: brew install ${NEED_INSTALL[*]}"
+if [[ -z "$PYTHON_BIN" ]] && command -v python3 &>/dev/null; then
+    if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)' 2>/dev/null; then
+        PYTHON_BIN=$(command -v python3)
+    fi
+fi
+
+if [[ -z "$PYTHON_BIN" ]]; then
+    log_warn "Kein Python 3.11+ gefunden — installiere python@3.12 via Homebrew (kann ein paar Minuten dauern)"
+    run_brew install python@3.12 || {
+        log_err "Homebrew-Install python@3.12 fehlgeschlagen — bitte manuell: brew install python@3.12"
+        exit 1
+    }
+    PYTHON_BIN="$BREW_PREFIX/opt/python@3.12/bin/python3.12"
+    [[ ! -x "$PYTHON_BIN" ]] && PYTHON_BIN="$BREW_PREFIX/bin/python3.12"
+fi
+
+if [[ ! -x "$PYTHON_BIN" ]]; then
+    log_err "Python 3.11+ konnte nicht eingerichtet werden"
+    exit 1
+fi
+PY_VER=$("$PYTHON_BIN" -c 'import sys; print("%d.%d.%d"%sys.version_info[:3])')
+log_ok "Python: $PYTHON_BIN (Version $PY_VER)"
+
+# ffmpeg
+if ! command -v ffmpeg &>/dev/null && [[ ! -x "$BREW_PREFIX/bin/ffmpeg" ]]; then
+    log_warn "Installiere ffmpeg via Homebrew"
+    run_brew install ffmpeg || {
+        log_err "Homebrew-Install ffmpeg fehlgeschlagen — bitte manuell: brew install ffmpeg"
         exit 1
     }
 fi
-log_ok "Alle Tools verfuegbar"
+FFMPEG_BIN=$(command -v ffmpeg || echo "$BREW_PREFIX/bin/ffmpeg")
+log_ok "ffmpeg: $FFMPEG_BIN"
+
+# Restliche System-Tools (git, ssh, openssl) sind im macOS Default
+for cmd in git ssh ssh-keygen openssl; do
+    if ! command -v "$cmd" &>/dev/null; then
+        log_err "$cmd nicht gefunden — sollte mit Xcode-CLI-Tools mitkommen"
+        log_err "Installiere mit: xcode-select --install"
+        exit 1
+    fi
+done
+log_ok "System-Tools (git, ssh, openssl) verfuegbar"
 
 # Worker-User pruefen
 if ! id "$WORKER_USER" &>/dev/null; then
@@ -322,9 +392,31 @@ log_ok "Worker-Code in $INSTALL_DIR"
 # ── Phase 3: Python-venv + Dependencies ────────────────────────
 log_phase "Python-venv anlegen"
 
-# Als Worker-User installieren — venv soll dem User gehoeren
-sudo -u "$WORKER_USER" bash -lc "cd $INSTALL_DIR && python3 -m venv .venv && .venv/bin/pip install --upgrade pip wheel >/dev/null && .venv/bin/pip install -e ." \
-    || { log_err "venv-Setup fehlgeschlagen"; exit 1; }
+# Pruefen ob ein vorhandenes venv die richtige Python-Version hat. Das
+# Skript wird haeufiger einmal mit System-Python 3.9 angefangen worden
+# sein und dann hier abgebrochen — danach liegt ein kaputtes venv rum.
+EXISTING_PY="$INSTALL_DIR/.venv/bin/python"
+if [[ -x "$EXISTING_PY" ]]; then
+    if "$EXISTING_PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)' 2>/dev/null; then
+        log_info "Bestehendes venv ist kompatibel — behalte"
+    else
+        log_warn "Bestehendes venv hat zu altes Python — wird neu erstellt"
+        rm -rf "$INSTALL_DIR/.venv"
+    fi
+fi
+
+# Venv mit dem ermittelten PYTHON_BIN erzeugen falls nicht da
+if [[ ! -x "$INSTALL_DIR/.venv/bin/python" ]]; then
+    sudo -u "$WORKER_USER" "$PYTHON_BIN" -m venv "$INSTALL_DIR/.venv" \
+        || { log_err "venv-Erzeugung fehlgeschlagen"; exit 1; }
+    log_ok "venv erstellt mit Python $PY_VER"
+fi
+
+# Pip + Wheel + Worker-Paket installieren
+sudo -u "$WORKER_USER" "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip wheel >/dev/null \
+    || { log_err "pip-Upgrade fehlgeschlagen"; exit 1; }
+sudo -u "$WORKER_USER" bash -lc "cd $INSTALL_DIR && .venv/bin/pip install -e ." \
+    || { log_err "Worker-Install fehlgeschlagen"; exit 1; }
 log_ok "Worker-Code installiert (.venv)"
 
 # ── Phase 4: TLS-Self-Signed-Cert ──────────────────────────────
@@ -451,12 +543,20 @@ fi
 # Plist aus dem Repo nehmen, ggf. Pfade anpassen
 cp "$INSTALL_DIR/launchd/de.sleeplab.video-worker.plist" "$PLIST"
 
-# UserName + Pfade in der plist setzen falls die Defaults nicht passen
+# UserName + Install-Pfad in der plist setzen falls die Defaults nicht passen.
+# PATH muss den Brew-Prefix enthalten damit ffmpeg auf Apple Silicon
+# (/opt/homebrew/bin) wie auch Intel (/usr/local/bin) gefunden wird.
+PLIST_PATH="${BREW_PREFIX}/bin:/usr/local/bin:/usr/bin:/bin"
+
 sed -i.bak \
     -e "s|/opt/sleeplab-video-worker|$INSTALL_DIR|g" \
     -e "s|<string>ki</string>|<string>$WORKER_USER</string>|g" \
+    -e "s|/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin|$PLIST_PATH|g" \
     "$PLIST"
 rm -f "$PLIST.bak"
+
+# WORKER_CONFIG-Env in der plist auf die echte Klinik-Config zeigen
+# (das Repo-Default zeigt auf /etc/sleeplab-video-worker/config.yaml — passt)
 
 chown root:wheel "$PLIST"
 chmod 644       "$PLIST"
