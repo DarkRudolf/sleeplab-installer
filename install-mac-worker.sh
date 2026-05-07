@@ -178,11 +178,23 @@ if ! id "$WORKER_USER" &>/dev/null; then
 fi
 log_ok "Worker-User: $WORKER_USER"
 
-# Verzeichnisse vorbereiten
+# Verzeichnisse vorbereiten.
+#
+# Wichtig fuer Mac: Der Worker-Service laeuft als $WORKER_USER (typisch ki),
+# nicht als root wie bei Linux. Wenn /etc/sleeplab/ssh/ root-owned mit mode 700
+# ist, kann der Worker-User die Deploy-Keys nicht lesen → spaetere git pulls
+# (z.B. /admin/update) failen mit 'Could not read from remote repository'.
+# Ebenso fuer /etc/sleeplab-video-worker/config.yaml mit mode 600 root-owned —
+# dann liest der Worker beim Start die config nicht und crasht mit
+# 'shared_secret nicht gesetzt'.
+#
+# Loesung: Verzeichnisse gehoeren dem Worker-User mit restriktiven Modes.
+# Root kann via Privilegien sowieso rein, sonstige User nicht.
 mkdir -p "$SSH_DIR" "$CONFIG_DIR" "$TLS_DIR" "$INSTALL_DIR"
 chmod 700 "$SSH_DIR" "$TLS_DIR"
 chmod 755 "$CONFIG_DIR"
-chown -R root:wheel "$SSH_DIR" "$CONFIG_DIR"
+chown -R "$WORKER_USER":wheel "$SSH_DIR"
+chown -R "$WORKER_USER":wheel "$CONFIG_DIR"
 
 # ── Phase 1: Deploy-Key ─────────────────────────────────────────
 log_phase "SSH-Deploy-Key fuer sleeplab-video-worker"
@@ -237,6 +249,7 @@ EXPLAIN
             -f "$KEY_WORKER" >/dev/null
         chmod 600 "$KEY_WORKER"
         chmod 644 "${KEY_WORKER}.pub"
+        chown "$WORKER_USER":wheel "$KEY_WORKER" "${KEY_WORKER}.pub"
 
         # SSH-Config schreiben (oder ergaenzen falls schon vorhanden)
         if [[ ! -f "$SSH_CONFIG" ]]; then
@@ -258,6 +271,8 @@ Host github.com-sleeplab-video-worker
 EOF
             log_ok "SSH-Config-Eintrag hinzugefuegt"
         fi
+        chmod 600 "$SSH_CONFIG"
+        chown "$WORKER_USER":wheel "$SSH_CONFIG"
 
         log_ok "Key erstellt: $KEY_WORKER"
     else
@@ -500,7 +515,8 @@ EOF
 
     chmod 600 "$TLS_DIR/server.key"
     chmod 644 "$TLS_DIR/server.crt"
-    chown root:wheel "$TLS_DIR/server.key" "$TLS_DIR/server.crt"
+    # Worker-User muss Cert + Key lesen koennen — die laufen als $WORKER_USER
+    chown "$WORKER_USER":wheel "$TLS_DIR/server.key" "$TLS_DIR/server.crt"
 
     FINGERPRINT=$(openssl x509 -in "$TLS_DIR/server.crt" -noout -fingerprint -sha256 \
         | sed 's/^.*=//' | tr -d ':')
@@ -553,7 +569,8 @@ logging:
   file: "/var/log/sleeplab-video-worker.log"
 EOF
     chmod 600 "$CONFIG_FILE"
-    chown root:wheel "$CONFIG_FILE"
+    # Worker-User muss config lesen — sonst Crash mit 'shared_secret nicht gesetzt'
+    chown "$WORKER_USER":wheel "$CONFIG_FILE"
     log_ok "Konfig erstellt: $CONFIG_FILE"
 else
     log_info "Konfig existiert: $CONFIG_FILE (bleibt unveraendert)"
