@@ -378,7 +378,7 @@ HINTS
     rm -f "$REQUEST_FILE"
 fi
 
-# ── Phase 2: Repo klonen ────────────────────────────────────────
+# ── Phase 2: Repo klonen + persistenter SSH-Config-Include ──────
 log_phase "Worker-Repo klonen"
 
 export GIT_SSH_COMMAND="ssh -F $SSH_CONFIG"
@@ -392,6 +392,35 @@ else
 fi
 chown -R "$WORKER_USER":staff "$INSTALL_DIR"
 log_ok "Worker-Code in $INSTALL_DIR"
+
+# SSH-Config-Include in ~$WORKER_USER/.ssh/config einrichten — sonst kennen
+# spaetere 'git pull' (z.B. /admin/update vom psg-viewer aus) den Host-Alias
+# 'github.com-sleeplab-video-worker' nicht und failen mit
+# "Could not resolve hostname". GIT_SSH_COMMAND-Env greift nur waehrend dieses
+# Skript-Laufs.
+USER_HOME=$(dscl . -read "/Users/$WORKER_USER" NFSHomeDirectory 2>/dev/null \
+    | awk '{print $2}')
+USER_HOME="${USER_HOME:-/Users/$WORKER_USER}"
+USER_SSH_DIR="$USER_HOME/.ssh"
+USER_SSH_CFG="$USER_SSH_DIR/config"
+INCLUDE_LINE="Include $SSH_CONFIG"
+
+mkdir -p "$USER_SSH_DIR"
+chmod 700 "$USER_SSH_DIR"
+chown "$WORKER_USER":staff "$USER_SSH_DIR"
+
+if [[ ! -f "$USER_SSH_CFG" ]] || ! grep -qF "$INCLUDE_LINE" "$USER_SSH_CFG"; then
+    if [[ -f "$USER_SSH_CFG" ]]; then
+        # Include muss am Anfang stehen, sonst greift's nicht fuer alle Hosts
+        { echo "$INCLUDE_LINE"; cat "$USER_SSH_CFG"; } > "${USER_SSH_CFG}.tmp"
+        mv "${USER_SSH_CFG}.tmp" "$USER_SSH_CFG"
+    else
+        echo "$INCLUDE_LINE" > "$USER_SSH_CFG"
+    fi
+    chmod 600 "$USER_SSH_CFG"
+    chown "$WORKER_USER":staff "$USER_SSH_CFG"
+    log_ok "SSH-Config-Include in $USER_SSH_CFG"
+fi
 
 # ── Phase 3: Python-venv + Dependencies ────────────────────────
 log_phase "Python-venv anlegen"
