@@ -572,6 +572,27 @@ chown "$WORKER_USER":staff /var/log/sleeplab-video-worker.*.log 2>/dev/null || t
 launchctl load "$PLIST"
 log_ok "LaunchDaemon geladen"
 
+# Sudoers-Eintrag damit der Worker-User passwortlos den Service per
+# 'launchctl kickstart' restarten darf. Wird vom /admin/update-Endpoint
+# gebraucht wenn der psg-viewer-Admin den Worker aktualisieren will.
+SUDOERS_FILE="/etc/sudoers.d/sleeplab-video-worker"
+if [[ ! -f "$SUDOERS_FILE" ]]; then
+    cat > "$SUDOERS_FILE" <<EOF
+# Sleeplab Video-Worker — Self-Update
+# Erlaubt dem Worker-User passwortlosen Restart des LaunchDaemons.
+# Wird vom POST /admin/update-Endpoint genutzt.
+$WORKER_USER ALL=(root) NOPASSWD: /bin/launchctl kickstart -k system/de.sleeplab.video-worker
+EOF
+    chmod 440 "$SUDOERS_FILE"
+    chown root:wheel "$SUDOERS_FILE"
+    if visudo -c -f "$SUDOERS_FILE" >/dev/null 2>&1; then
+        log_ok "sudoers-Eintrag fuer Self-Update angelegt: $SUDOERS_FILE"
+    else
+        log_warn "sudoers-Eintrag invalid — entferne wieder"
+        rm -f "$SUDOERS_FILE"
+    fi
+fi
+
 # ── Phase 7: Health-Check ──────────────────────────────────────
 log_phase "Smoke-Test"
 
