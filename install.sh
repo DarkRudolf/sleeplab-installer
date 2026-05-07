@@ -20,8 +20,12 @@
 set -euo pipefail
 
 # ── Farben ──────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
+# ANSI-C-Quoting ($'...') legt die echten Escape-Bytes in die Variablen,
+# damit auch heredocs (cat <<DONE) sie sauber rendern — nicht nur
+# 'echo -e'. Frueher hatten die Vars literale '\033'-Strings, dann blieben
+# sie im Email-Block als Text stehen statt zu faerben.
+RED=$'\e[0;31m'; GREEN=$'\e[0;32m'; YELLOW=$'\e[1;33m'
+BLUE=$'\e[0;34m'; CYAN=$'\e[0;36m'; BOLD=$'\e[1m'; DIM=$'\e[2m'; NC=$'\e[0m'
 
 log_info()  { echo -e "${BLUE}[INFO]${NC}  $*"; }
 log_ok()    { echo -e "${GREEN}[OK]${NC}    $*"; }
