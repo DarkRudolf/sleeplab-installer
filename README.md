@@ -171,10 +171,12 @@ Damit erzeugt der Installer nur Deploy-Keys für `pipeline` und `psg-viewer`.
 Auf dem Mac mini (frisch eingerichtet, Homebrew installiert):
 
 ```bash
-sudo curl -fsSL https://raw.githubusercontent.com/DarkRudolf/sleeplab-installer/main/install-mac-worker.sh -o install-mac-worker.sh
+curl -fsSL https://raw.githubusercontent.com/DarkRudolf/sleeplab-installer/main/install-mac-worker.sh -o install-mac-worker.sh
 chmod +x install-mac-worker.sh
 sudo ./install-mac-worker.sh
 ```
+
+> **Hinweis:** `curl` ohne `sudo` aufrufen — sonst gehört die Datei `root` und `chmod` failt mit *Operation not permitted*. Falls schon passiert: `sudo rm install-mac-worker.sh` und nochmal ohne `sudo` herunterladen.
 
 Das Skript führt durch:
 
@@ -224,7 +226,9 @@ chmod +x install.sh && sudo ./install.sh
 # Box 1 — Debian-VM
 INCLUDE_WORKER=no sudo ./install.sh
 
-# Box 2 — Mac mini
+# Box 2 — Mac mini (curl OHNE sudo, sonst root-owned → chmod failt)
+curl -fsSL https://raw.githubusercontent.com/DarkRudolf/sleeplab-installer/main/install-mac-worker.sh -o install-mac-worker.sh
+chmod +x install-mac-worker.sh
 sudo ./install-mac-worker.sh
 ```
 
