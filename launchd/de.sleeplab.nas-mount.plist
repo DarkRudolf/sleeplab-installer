@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  System-Level NAS-Mount fuer sleeplab-video-worker.
+
+  WHY: Der Worker-LaunchDaemon laeuft als ki, aber ohne User-Login-Session.
+  User-Mounts (mount_smbfs durch eingeloggten User) sind in dieser Daemon-
+  Session nicht zugreifbar. Daher braucht's einen System-Level-Mount —
+  beim Boot durch launchd, bevor der Worker startet.
+
+  Installation:
+    sudo cp launchd/de.sleeplab.nas-mount.plist /Library/LaunchDaemons/
+    sudo chown root:wheel /Library/LaunchDaemons/de.sleeplab.nas-mount.plist
+    sudo chmod 600       /Library/LaunchDaemons/de.sleeplab.nas-mount.plist
+    sudo launchctl load /Library/LaunchDaemons/de.sleeplab.nas-mount.plist
+
+  Mode 600 weil Credentials im Plist stehen — nur root soll lesen.
+
+  Mount-Pfad: /Volumes/sleeplab-daten (System-Standard fuer macOS).
+  Worker-Config muss entsprechend zeigen:
+    storage.asf_source: /Volumes/sleeplab-daten/MSV_Data
+    storage.mp4_cache:  /Volumes/sleeplab-daten/Import/_video_cache
+    index.file_path:    /Volumes/sleeplab-daten/sleeplab-index/asf_index.txt
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+                       "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>de.sleeplab.nas-mount</string>
+
+  <!-- mount_smbfs: kein Daemon, einmal-laufender Befehl. KeepAlive=false,
+       RunAtLoad=true. Wenn der Mount mal weg ist, muss launchctl kickstart
+       gerufen werden — oder wir adden ein Watchdog-Script (spaeter). -->
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>mkdir -p /Volumes/sleeplab-daten &amp;&amp; mount_smbfs "//sl-server;Administrator:CHANGE_ME@192.168.100.117/daten" /Volumes/sleeplab-daten</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Bei Crash nicht endlos retry — mount_smbfs failed oft initial weil
+       Netzwerk noch nicht da. Zwei retries reichen. -->
+  <key>StartInterval</key>
+  <integer>60</integer>
+
+  <key>StandardOutPath</key>
+  <string>/var/log/sleeplab-nas-mount.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/sleeplab-nas-mount.err.log</string>
+</dict>
+</plist>

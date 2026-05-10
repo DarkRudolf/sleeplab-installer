@@ -550,9 +550,12 @@ server:
     key_file: "${TLS_DIR}/server.key"
 
 storage:
-  asf_source: "/Users/${WORKER_USER}/nas/MSV_Data"
-  mp4_cache:  "/Users/${WORKER_USER}/nas/Import/_video_cache"
+  asf_source: "${NAS_MOUNT_POINT:-/Volumes/sleeplab-daten}/MSV_Data"
+  mp4_cache:  "${NAS_MOUNT_POINT:-/Volumes/sleeplab-daten}/Import/_video_cache"
   work_dir:   "/var/sleeplab-worker/tmp"
+
+index:
+  file_path: "${NAS_MOUNT_POINT:-/Volumes/sleeplab-daten}/sleeplab-index/asf_index.txt"
 
 encoder:
   backend: "auto"
@@ -580,6 +583,114 @@ fi
 # work_dir vorbereiten
 mkdir -p /var/sleeplab-worker/tmp
 chown -R "$WORKER_USER":staff /var/sleeplab-worker
+
+# ── Phase 5b: NAS-Mount-LaunchDaemon ───────────────────────────
+log_phase "NAS-Mount system-wide einrichten"
+
+NAS_MOUNT_POINT="${NAS_MOUNT_POINT:-/Volumes/sleeplab-daten}"
+NAS_MOUNT_PLIST="/Library/LaunchDaemons/de.sleeplab.nas-mount.plist"
+NAS_MOUNT_LOG="/var/log/sleeplab-nas-mount.log"
+
+if [[ -f "$NAS_MOUNT_PLIST" ]]; then
+    log_info "NAS-Mount-Daemon existiert schon — uebernehme bestehende Plist"
+else
+    cat <<EXPLAIN
+
+LaunchDaemons (wie der Video-Worker) laufen ohne User-Login-Session und
+sehen Mounts NICHT die per Finder/User-Login-Item gemountet wurden.
+Daher muss der NAS-Share von einem System-Level LaunchDaemon gemountet
+werden (= '/Library/LaunchDaemons/de.sleeplab.nas-mount.plist').
+
+Daten brauchen:
+  - NAS-Hostname oder IP   (z.B. sl-server  oder  192.168.100.117)
+  - NAS-Workgroup/Domain   (z.B. sl-server  — leer lassen falls nicht relevant)
+  - Username
+  - Password
+  - Share-Name             (z.B. daten)
+  - Mountpoint             (Default: $NAS_MOUNT_POINT)
+
+Credentials werden in der Plist im Klartext gespeichert. Plist ist root:wheel
+mode 600 — nur root liest. Service-Account mit nur Read-Recht empfohlen.
+
+EXPLAIN
+    read -p "NAS-Hostname / IP            > " NAS_HOST
+    read -p "Workgroup (Enter=leer)      > " NAS_WORKGROUP
+    read -p "Username                    > " NAS_USER
+    read -s -p "Password                   > " NAS_PASS
+    echo ""
+    read -p "Share-Name                  > " NAS_SHARE
+    read -p "Mountpoint [$NAS_MOUNT_POINT] > " NAS_MOUNT_INPUT
+    NAS_MOUNT_POINT="${NAS_MOUNT_INPUT:-$NAS_MOUNT_POINT}"
+
+    [[ -z "$NAS_HOST"  ]] && { log_err "Hostname fehlt";  exit 1; }
+    [[ -z "$NAS_USER"  ]] && { log_err "User fehlt";      exit 1; }
+    [[ -z "$NAS_PASS"  ]] && { log_err "Password fehlt";  exit 1; }
+    [[ -z "$NAS_SHARE" ]] && { log_err "Share-Name fehlt"; exit 1; }
+
+    # SMB-URL bauen — workgroup mit Semikolon, password mit Doppelpunkt
+    if [[ -n "$NAS_WORKGROUP" ]]; then
+        NAS_URL="//${NAS_WORKGROUP};${NAS_USER}:${NAS_PASS}@${NAS_HOST}/${NAS_SHARE}"
+    else
+        NAS_URL="//${NAS_USER}:${NAS_PASS}@${NAS_HOST}/${NAS_SHARE}"
+    fi
+
+    cat > "$NAS_MOUNT_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+                       "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>de.sleeplab.nas-mount</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>mkdir -p $NAS_MOUNT_POINT &amp;&amp; mount_smbfs "$NAS_URL" $NAS_MOUNT_POINT</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>60</integer>
+  <key>StandardOutPath</key><string>$NAS_MOUNT_LOG</string>
+  <key>StandardErrorPath</key><string>${NAS_MOUNT_LOG%.log}.err.log</string>
+</dict>
+</plist>
+EOF
+    chmod 600 "$NAS_MOUNT_PLIST"
+    chown root:wheel "$NAS_MOUNT_PLIST"
+    log_ok "NAS-Mount-Plist geschrieben (root:wheel mode 600)"
+fi
+
+# Service laden / neuladen
+launchctl unload "$NAS_MOUNT_PLIST" 2>/dev/null || true
+launchctl load "$NAS_MOUNT_PLIST"
+
+# Auf den Mount warten (max 30s)
+log_info "Warte auf NAS-Mount unter $NAS_MOUNT_POINT ..."
+for i in $(seq 1 30); do
+    if mount | grep -q " on $NAS_MOUNT_POINT "; then
+        log_ok "NAS-Mount aktiv: $NAS_MOUNT_POINT"
+        break
+    fi
+    sleep 1
+done
+
+if ! mount | grep -q " on $NAS_MOUNT_POINT "; then
+    log_warn "NAS-Mount nicht aktiv nach 30s — prüfe $NAS_MOUNT_LOG"
+    log_warn "Manuell testen: ls $NAS_MOUNT_POINT"
+fi
+
+# Worker-Config auf System-Mount-Pfade umstellen falls noch der alte
+# /Users/<user>/nas-Pfad drinsteht
+if grep -q "/Users/.*/nas/" "$CONFIG_FILE" 2>/dev/null; then
+    log_info "Worker-Config zeigt noch auf User-Mount — auf $NAS_MOUNT_POINT umstellen"
+    sed -i.bak \
+        -e "s|/Users/${WORKER_USER}/nas/|${NAS_MOUNT_POINT}/|g" \
+        -e "s|/Users/ki/nas/|${NAS_MOUNT_POINT}/|g" \
+        "$CONFIG_FILE"
+    rm -f "${CONFIG_FILE}.bak"
+    log_ok "Worker-Config auf $NAS_MOUNT_POINT umgestellt"
+fi
+
 
 # ── Phase 6: LaunchDaemon ──────────────────────────────────────
 log_phase "LaunchDaemon installieren"
